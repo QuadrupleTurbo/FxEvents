@@ -13,14 +13,14 @@ namespace FxEvents.Shared.Message
         public Snowflake Id { get; set; }
         public string? Signature { get; set; }
         public string? Endpoint { get; set; }
-        public EventFlowType Flow { get; set; }
+        public EventFlowType FlowType { get; set; }
         public IEnumerable<EventParameter> Parameters { get; set; }
         public EventMessage() { }
-        public EventMessage(string endpoint, EventFlowType flow, IEnumerable<EventParameter> parameters)
+        public EventMessage(string endpoint, EventFlowType flowType, IEnumerable<EventParameter> parameters)
         {
             Id = Snowflake.Next();
             Endpoint = endpoint;
-            Flow = flow;
+            FlowType = flowType;
             Parameters = parameters;
         }
 
@@ -54,7 +54,7 @@ namespace FxEvents.Shared.Message
                 writer.Write(Endpoint);
             }
 
-            writer.Write((int)Flow);
+            writer.Write((int)FlowType);
 
             writer.Write(Parameters is not null);
             if (Parameters is not null)
@@ -87,7 +87,7 @@ namespace FxEvents.Shared.Message
                 Endpoint = reader.ReadString();
             }
 
-            Flow = (EventFlowType)reader.ReadInt32();
+            FlowType = (EventFlowType)reader.ReadInt32();
 
             if (reader.ReadBoolean())
             {

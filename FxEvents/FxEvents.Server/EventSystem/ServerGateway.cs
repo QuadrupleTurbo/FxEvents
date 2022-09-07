@@ -18,7 +18,7 @@ namespace FxEvents.EventSystem
     public class ServerGateway : BaseGateway
     {
         protected override ISerialization Serialization { get; }
-        private Dictionary<int, string> _signatures;
+        private Dictionary<int, string> _signatures = new();
 
         public ServerGateway()
         {
@@ -26,15 +26,14 @@ namespace FxEvents.EventSystem
             Serialization = new BinarySerialization();
             DelayDelegate = async delay => await BaseScript.Delay(delay);
             PushDelegate = Push;
-            _signatures = new();
+            EventDispatcher.Instance.AddEventHandler(EventConstant.InvokePipeline, new Action<string, byte[]>(Invoke));
+            EventDispatcher.Instance.AddEventHandler(EventConstant.ReplyPipeline, new Action<string, byte[]>(Reply));
             EventDispatcher.Instance.AddEventHandler(EventConstant.SignaturePipeline, new Action<string>(GetSignature));
-            EventDispatcher.Instance.AddEventHandler(EventConstant.InboundPipeline, new Action<string, byte[]>(Inbound));
-            EventDispatcher.Instance.AddEventHandler(EventConstant.OutboundPipeline, new Action<string, byte[]>(Outbound));
-        }
+           }
 
         public void Push(string pipeline, int source, byte[] buffer)
         {
-            if (source != new ServerId().Handle)
+            if (source != -1)
                 BaseScript.TriggerClientEvent(EventDispatcher.Instance.GetPlayers[source], pipeline, buffer);
             else
                 BaseScript.TriggerClientEvent(pipeline, buffer);
@@ -71,7 +70,7 @@ namespace FxEvents.EventSystem
             }
         }
 
-        private async void Inbound([FromSource] string source, byte[] buffer)
+        private async void Invoke([FromSource] string source, byte[] buffer)
         {
             try
             {
@@ -79,16 +78,14 @@ namespace FxEvents.EventSystem
 
                 if (!_signatures.TryGetValue(client, out var signature)) return;
 
-                using var context = new SerializationContext(EventConstant.InboundPipeline, null, Serialization, buffer);
-
+                using var context = new SerializationContext(EventConstant.InvokePipeline, "(Gateway) Invoke", Serialization, buffer);
                 var message = context.Deserialize<EventMessage>();
-
 
                 if (!VerifySignature(client, message, signature)) return;
 
                 try
                 {
-                    await ProcessInboundAsync(message, client);
+                    await ProcessInvokeAsync(message, client);
                 }
                 catch (TimeoutException)
                 {
@@ -101,6 +98,26 @@ namespace FxEvents.EventSystem
             }
         }
 
+        private void Reply([FromSource] string source, byte[] buffer)
+        {
+            try
+            {
+                var client = int.Parse(source.Replace("net:", string.Empty));
+
+                if (!_signatures.TryGetValue(client, out var signature)) return;
+
+                using var context = new SerializationContext(EventConstant.ReplyPipeline, "(Gateway) Reply", Serialization, buffer);
+                var response = context.Deserialize<EventResponseMessage>();
+
+                if (!VerifySignature(client, response, signature)) return;
+
+                ProcessReply(response);
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex.ToString());
+            }
+        }
         public bool VerifySignature(int source, IMessage message, string signature)
         {
             if (message.Signature == signature) return true;
@@ -112,27 +129,6 @@ namespace FxEvents.EventSystem
             return false;
         }
 
-        private void Outbound([FromSource] string source, byte[] buffer)
-        {
-            try
-            {
-                var client = int.Parse(source.Replace("net:", string.Empty));
-
-                if (!_signatures.TryGetValue(client, out var signature)) return;
-
-                using var context = new SerializationContext(EventConstant.OutboundPipeline, null, Serialization, buffer);
-
-                var response = context.Deserialize<EventResponseMessage>();
-
-                if (!VerifySignature(client, response, signature)) return;
-
-                ProcessOutbound(response);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error(ex.ToString());
-            }
-        }
 
         public void Send(Player player, string endpoint, params object[] args) => Send(Convert.ToInt32(player.Handle), endpoint, args);
         public void Send(ISource client, string endpoint, params object[] args) => Send(client.Handle, endpoint, args);
@@ -155,11 +151,11 @@ namespace FxEvents.EventSystem
             await SendInternal(EventFlowType.Straight, target, endpoint, args);
         }
 
-        public Task<T> Get<T>(Player player, string endpoint, params object[] args) where T : class =>
-            Get<T>(Convert.ToInt32(player.Handle), endpoint, args);
+        public Task<T> Get<T>(Player player, string endpoint, params object[] args) where T : class => Get<T>(Convert.ToInt32(player.Handle), endpoint, args);
 
-        public Task<T> Get<T>(ISource client, string endpoint, params object[] args) where T : class =>
-            Get<T>(client.Handle, endpoint, args);
+        public Task<T> Get<T>(ISource client, string endpoint, params object[] args) where T : class => Get<T>(client.Handle, endpoint, args);
+
+        public Task<T> Get<T>(string target, string endpoint, params object[] args) where T : class => Get<T>(EventDispatcher.Instance.GetPlayers[target], endpoint, args);
 
         public async Task<T> Get<T>(int target, string endpoint, params object[] args) where T : class
         {

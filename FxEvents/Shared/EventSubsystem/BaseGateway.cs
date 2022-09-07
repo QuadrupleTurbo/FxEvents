@@ -14,6 +14,7 @@ using CitizenFX.Core.Native;
 using CitizenFX.Core;
 using System.Reflection;
 using System.Linq.Expressions;
+using FxEvents.Events.Models;
 
 namespace FxEvents.Shared.EventSubsystem
 {
@@ -31,20 +32,87 @@ namespace FxEvents.Shared.EventSubsystem
         private List<EventObservable> _queue = new();
         private List<EventHandler> _handlers = new();
 
+        public delegate void EventPipeline(PipelineEvent type, NetworkEvent value);
+        public event EventPipeline Pipeline;
+
         public EventDelayMethod? DelayDelegate { get; set; }
         public EventMessagePreparation? PrepareDelegate { get; set; }
         public EventMessagePush? PushDelegate { get; set; }
 
-        public async Task ProcessInboundAsync(int source, byte[] serialized)
+        public async Task ProcessInvokeAsync(int source, byte[] serialized)
         {
-            using var context = new SerializationContext(EventConstant.InboundPipeline, "(Process) In", Serialization, serialized);
+            using var context = new SerializationContext(EventConstant.InvokePipeline, "(Process) In", Serialization, serialized);
             var message = context.Deserialize<EventMessage>();
 
-            await ProcessInboundAsync(message, source);
+            await ProcessInvokeAsync(message, source);
         }
 
-        public async Task ProcessInboundAsync(EventMessage message, int source)
+        public async Task ProcessInvokeAsync(EventMessage message, int source)
         {
+
+            if (message.FlowType == EventFlowType.Circular)
+            {
+                var stopwatch = StopwatchUtil.StartNew();
+                var subscription = _handlers.SingleOrDefault(self => self.Endpoint == message.Endpoint) ??
+                                   throw new Exception($"Could not find a handler for endpoint '{message.Endpoint}'");
+                var result = InvokeDelegate(subscription);
+
+                if (result.GetType().GetGenericTypeDefinition() == typeof(Task<>))
+                {
+                    using var token = new CancellationTokenSource();
+
+                    var task = (Task)result;
+                    var timeout = DelayDelegate!(10000);
+                    var completed = await Task.WhenAny(task, timeout);
+
+                    if (completed == task)
+                    {
+                        token.Cancel();
+
+                        await task.ConfigureAwait(false);
+
+                        result = (object)((dynamic)task).Result;
+                    }
+                    else
+                    {
+                        throw new EventTimeoutException(
+                            $"({message.Endpoint} - {subscription.Delegate.Method.DeclaringType?.Name ?? "null"}/{subscription.Delegate.Method.Name}) The operation was timed out");
+                    }
+                }
+
+                var resultType = result?.GetType() ?? typeof(object);
+                var response = new EventResponseMessage(message.Id, message.Endpoint, message.Signature, null);
+
+                if (result != null)
+                {
+                    using var context = new SerializationContext(message.Endpoint, "(Process) Result", Serialization);
+                    context.Serialize(resultType, result);
+                    response.Data = context.GetData();
+                }
+                else
+                {
+                    response.Data = Array.Empty<byte>();
+                }
+
+                using (var context = new SerializationContext(message.Endpoint, "(Process) Response", Serialization))
+                {
+                    context.Serialize(response);
+
+                    var data = context.GetData();
+
+                    PushDelegate(EventConstant.ReplyPipeline, source, data);
+                    if (EventDispatcher.Debug)
+                        Logger.Debug($"[{message.Endpoint}] Responded to {source} with {data.Length} byte(s) in {stopwatch.Elapsed.TotalMilliseconds}ms");
+                }
+            }
+            else
+            {
+                foreach (var handler in _handlers.Where(self => message.Endpoint == self.Endpoint))
+                {
+                    InvokeDelegate(handler);
+                }
+            }
+
             object InvokeDelegate(EventHandler subscription)
             {
                 var parameters = new List<object>();
@@ -114,79 +182,17 @@ namespace FxEvents.Shared.EventSubsystem
                 return @delegate.DynamicInvoke(parameters.ToArray());
             }
 
-            if (message.Flow == EventFlowType.Circular)
-            {
-                var stopwatch = StopwatchUtil.StartNew();
-                var subscription = _handlers.SingleOrDefault(self => self.Endpoint == message.Endpoint) ??
-                                   throw new Exception($"Could not find a handler for endpoint '{message.Endpoint}'");
-                var result = InvokeDelegate(subscription);
-
-                if (result.GetType().GetGenericTypeDefinition() == typeof(Task<>))
-                {
-                    using var token = new CancellationTokenSource();
-
-                    var task = (Task)result;
-                    var timeout = DelayDelegate!(10000);
-                    var completed = await Task.WhenAny(task, timeout);
-
-                    if (completed == task)
-                    {
-                        token.Cancel();
-
-                        await task.ConfigureAwait(false);
-
-                        result = (object)((dynamic)task).Result;
-                    }
-                    else
-                    {
-                        throw new EventTimeoutException(
-                            $"({message.Endpoint} - {subscription.Delegate.Method.DeclaringType?.Name ?? "null"}/{subscription.Delegate.Method.Name}) The operation was timed out");
-                    }
-                }
-
-                var resultType = result?.GetType() ?? typeof(object);
-                var response = new EventResponseMessage(message.Id, message.Endpoint, message.Signature, null);
-
-                if (result != null)
-                {
-                    using var context = new SerializationContext(message.Endpoint, "(Process) Result", Serialization);
-                    context.Serialize(resultType, result);
-                    response.Data = context.GetData();
-                }
-                else
-                {
-                    response.Data = Array.Empty<byte>();
-                }
-
-                using (var context = new SerializationContext(message.Endpoint, "(Process) Response", Serialization))
-                {
-                    context.Serialize(response);
-
-                    var data = context.GetData();
-
-                    PushDelegate(EventConstant.OutboundPipeline, source, data);
-                    if (EventDispatcher.Debug)
-                        Logger.Debug($"[{message.Endpoint}] Responded to {source} with {data.Length} byte(s) in {stopwatch.Elapsed.TotalMilliseconds}ms");
-                }
-            }
-            else
-            {
-                foreach (var handler in _handlers.Where(self => message.Endpoint == self.Endpoint))
-                {
-                    InvokeDelegate(handler);
-                }
-            }
         }
 
-        public void ProcessOutbound(byte[] serialized)
+        public void ProcessReply(byte[] serialized)
         {
-            using var context = new SerializationContext(EventConstant.OutboundPipeline, "(Process) Out", Serialization, serialized);
+            using var context = new SerializationContext(EventConstant.ReplyPipeline, "(Process) Out", Serialization, serialized);
             var response = context.Deserialize<EventResponseMessage>();
 
-            ProcessOutbound(response);
+            ProcessReply(response);
         }
 
-        public void ProcessOutbound(EventResponseMessage response)
+        public void ProcessReply(EventResponseMessage response)
         {
             var waiting = _queue.SingleOrDefault(self => self.Message.Id == response.Id) ?? throw new Exception($"No request matching {response.Id} was found.");
 
@@ -194,7 +200,55 @@ namespace FxEvents.Shared.EventSubsystem
             waiting.Callback.Invoke(response.Data);
         }
 
-        protected async Task<EventMessage> SendInternal(EventFlowType flow, int source, string endpoint, params object[] args)
+
+        protected async Task<EventMessage> SendInternal(EventFlowType flow, int source, string endpoint,
+            params object[] args)
+        {
+            var message = await CreateAndSendAsync(flow, source, endpoint, args);
+            var structure = new NetworkEvent(EventConstant.LocalSender, message);
+
+            Pipeline.Invoke(PipelineEvent.Sent, structure);
+
+            return message;
+        }
+
+        protected async Task<T> GetInternal<T>(int source, string endpoint, params object[] args)
+        {
+            var stopwatch = StopwatchUtil.StartNew();
+            var message = await CreateAndSendAsync(EventFlowType.Circular, source, endpoint, args);
+            var structure = new NetworkEvent(EventConstant.LocalSender, message);
+            var completion = new TaskCompletionSource<EventValueHolder<T>>();
+
+            Pipeline.Invoke(PipelineEvent.Sent, structure);
+
+            _queue.Add(new EventObservable(message, data =>
+            {
+                using var context = new SerializationContext(endpoint, "(Get) Response", Serialization, data);
+
+                var holder = new EventValueHolder<T>
+                {
+                    Data = data,
+                    Value = context.Deserialize<T>()
+                };
+
+                completion.TrySetResult(holder);
+            }));
+
+            await Task.WhenAny(completion.Task);
+
+            var holder = await completion.Task;
+            var elapsed = stopwatch.Elapsed.TotalMilliseconds;
+
+            structure.SetResponseData(holder.Value, GetCurrentTimestamp());
+            Pipeline.Invoke(PipelineEvent.Response, structure);
+
+            Logger.Debug(
+                $"[{message.Endpoint}] Received response from {source} of {holder.Data.Length} byte(s) in {elapsed}ms");
+
+            return holder.Value;
+        }
+
+        private async Task<EventMessage> CreateAndSendAsync(EventFlowType flow, int source, string endpoint, params object[] args)
         {
             var stopwatch = StopwatchUtil.StartNew();
             var parameters = new List<EventParameter>();
@@ -216,8 +270,7 @@ namespace FxEvents.Shared.EventSubsystem
             {
                 stopwatch.Stop();
 
-                await PrepareDelegate(EventConstant.InboundPipeline, source, message);
-
+                await PrepareDelegate(EventConstant.InvokePipeline, source, message);
                 stopwatch.Start();
             }
 
@@ -227,7 +280,7 @@ namespace FxEvents.Shared.EventSubsystem
 
                 var data = context.GetData();
 
-                PushDelegate(EventConstant.InboundPipeline, source, data);
+                PushDelegate(EventConstant.InvokePipeline, source, data);
                 if (EventDispatcher.Debug) 
                 { 
 
@@ -242,40 +295,7 @@ namespace FxEvents.Shared.EventSubsystem
             }
         }
 
-        protected async Task<T> GetInternal<T>(int source, string endpoint, params object[] args)
-        {
-            var stopwatch = StopwatchUtil.StartNew();
-            var message = await SendInternal(EventFlowType.Circular, source, endpoint, args);
-            var token = new CancellationTokenSource();
-            var holder = new EventValueHolder<T>();
-
-            _queue.Add(new EventObservable(message, data =>
-            {
-                using var context = new SerializationContext(endpoint, "(Get) Response", Serialization, data);
-
-                holder.Data = data;
-                holder.Value = context.Deserialize<T>();
-
-                token.Cancel();
-            }));
-
-            while (!token.IsCancellationRequested)
-            {
-                await DelayDelegate();
-            }
-
-
-            var elapsed = stopwatch.Elapsed.TotalMilliseconds;
-            if (EventDispatcher.Debug)
-            {
-#if CLIENT
-                Logger.Debug($"[{message.Endpoint} {EventFlowType.Circular}] Received response from {(source == -1 ? "Server" : API.GetPlayerName(source))} of {holder.Data.Length} byte(s) in {elapsed}ms");
-#elif SERVER
-                Logger.Debug($"[{message.Endpoint} {EventFlowType.Circular}] Received response from {(source == -1?"Server":API.GetPlayerName(""+source))} of {holder.Data.Length} byte(s) in {elapsed}ms");
-#endif
-            }
-            return holder.Value;
-        }
+        internal static long GetCurrentTimestamp() => (long)DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1)).TotalMilliseconds;
 
         public void Mount(string endpoint, Delegate @delegate)
         {

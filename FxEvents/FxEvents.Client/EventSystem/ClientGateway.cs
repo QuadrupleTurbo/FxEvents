@@ -14,9 +14,8 @@ namespace FxEvents.EventSystem
 {
     public class ClientGateway : BaseGateway
     {
-        public List<NetworkMessage> Buffer { get; } = new List<NetworkMessage>();
         protected override ISerialization Serialization { get; }
-        private string _signature;
+        private string? _signature;
 
         public ClientGateway()
         {
@@ -25,34 +24,12 @@ namespace FxEvents.EventSystem
             DelayDelegate = async delay => await BaseScript.Delay(delay);
             PrepareDelegate = PrepareAsync;
             PushDelegate = Push;
-            EventDispatcher.Instance.AddEventHandler(EventConstant.InboundPipeline, new Action<byte[]>(async serialized =>
-            {
-                try
-                {
-                    await ProcessInboundAsync(new ServerId().Handle, serialized);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("InboundPipeline:" + ex.ToString());
-                }
-            }));
+            EventDispatcher.Instance.AddEventHandler(EventConstant.InvokePipeline, new Action<byte[]>(async serialized => await ProcessInvokeAsync(new ServerId().Handle, serialized)));
+            EventDispatcher.Instance.AddEventHandler(EventConstant.ReplyPipeline, new Action<byte[]>(ProcessReply));
+            EventDispatcher.Instance.AddEventHandler(EventConstant.SignaturePipeline, new Action<string>(signature => _signature = signature));
 
-            EventDispatcher.Instance.AddEventHandler(EventConstant.OutboundPipeline, new Action<byte[]>(serialized =>
-            {
-                try
-                {
-                    ProcessOutbound(serialized);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("OutboundPipeline:" + ex.ToString());
-                }
-            }));
-
-            EventDispatcher.Instance.AddEventHandler(EventConstant.SignaturePipeline, new Action<string>(signature => _signature = signature ));
             BaseScript.TriggerServerEvent(EventConstant.SignaturePipeline);
         }
-
         public async Task PrepareAsync(string pipeline, int source, IMessage message)
         {
             if (_signature == null)
