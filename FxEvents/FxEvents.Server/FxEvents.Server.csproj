@@ -20,6 +20,7 @@
     <PackageRequireLicenseAcceptance>False</PackageRequireLicenseAcceptance>
     <GeneratePackageOnBuild>False</GeneratePackageOnBuild>
     <Version>2.5.0</Version>
+    <RunPostBuildEvent>Always</RunPostBuildEvent>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -60,7 +61,9 @@
     <None Include=".editorconfig" />
   </ItemGroup>
   <ItemGroup>
-    <EditorConfigFiles
-			Remove=".editorconfig" />
+    <EditorConfigFiles Remove=".editorconfig" />
   </ItemGroup>
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Exec Command="$(SolutionDir)build.bat &quot;$(TargetDir)$(TargetFileName)&quot; &quot;Server&quot; " />
+  </Target>
 </Project>
