@@ -1,4 +1,5 @@
-﻿using FxEvents.Shared.EventSubsystem;
+﻿using FxEvents.Shared;
+using FxEvents.Shared.EventSubsystem;
 using FxEvents.Shared.Message;
 using FxEvents.Shared.Serialization;
 using FxEvents.Shared.Serialization.Implementations;
@@ -17,6 +18,8 @@ namespace FxEvents.EventSystem
         protected override ISerialization Serialization { get; }
         private Dictionary<int, string> _signatures;
 
+        private EventDispatcher _eventDispatcher => EventDispatcher.Instance;
+
         public ServerGateway()
         {
             SnowflakeGenerator.Create((short)new Random().Next(200, 399));
@@ -28,15 +31,15 @@ namespace FxEvents.EventSystem
 
         internal void AddEvents()
         {
-            EventDispatcher.Instance.AddEventHandler(SignaturePipeline, new Action<string>(GetSignature));
-            EventDispatcher.Instance.AddEventHandler(InboundPipeline, new Action<string, byte[]>(Inbound));
-            EventDispatcher.Instance.AddEventHandler(OutboundPipeline, new Action<string, byte[]>(Outbound));
+            _eventDispatcher.AddEventHandler(SignaturePipeline, new Action<string>(GetSignature));
+            _eventDispatcher.AddEventHandler(InboundPipeline, new Action<string, byte[]>(Inbound));
+            _eventDispatcher.AddEventHandler(OutboundPipeline, new Action<string, byte[]>(Outbound));
         }
 
         public void Push(string pipeline, int source, byte[] buffer)
         {
             if (source != new ServerId().Handle)
-                BaseScript.TriggerClientEvent(EventDispatcher.Instance.GetPlayers[source], pipeline, buffer);
+                BaseScript.TriggerClientEvent(_eventDispatcher.GetPlayers[source], pipeline, buffer);
             else
                 BaseScript.TriggerClientEvent(pipeline, buffer);
         }
@@ -64,7 +67,7 @@ namespace FxEvents.EventSystem
                 string signature = BitConverter.ToString(holder).Replace("-", "").ToLower();
 
                 _signatures.Add(client, signature);
-                BaseScript.TriggerClientEvent(EventDispatcher.Instance.GetPlayers[client], SignaturePipeline, signature);
+                BaseScript.TriggerClientEvent(_eventDispatcher.GetPlayers[client], SignaturePipeline, signature);
             }
             catch (Exception ex)
             {
@@ -72,7 +75,7 @@ namespace FxEvents.EventSystem
             }
         }
 
-        private async void Inbound([FromSource] string source, byte[] buffer)
+        private async void Inbound([FromSource] string source, byte[] encrypted)
         {
             try
             {
@@ -80,10 +83,7 @@ namespace FxEvents.EventSystem
 
                 if (!_signatures.TryGetValue(client, out string signature)) return;
 
-                using SerializationContext context = new SerializationContext(InboundPipeline, null, Serialization, buffer);
-
-                EventMessage message = context.Deserialize<EventMessage>();
-
+                EventMessage message = encrypted.DecryptObject<EventMessage>(EventDispatcher.EncryptionKey);
 
                 if (!VerifySignature(client, message, signature)) return;
 
@@ -113,7 +113,7 @@ namespace FxEvents.EventSystem
             return false;
         }
 
-        private void Outbound([FromSource] string source, byte[] buffer)
+        private void Outbound([FromSource] string source, byte[] encrypted)
         {
             try
             {
@@ -121,9 +121,7 @@ namespace FxEvents.EventSystem
 
                 if (!_signatures.TryGetValue(client, out string signature)) return;
 
-                using SerializationContext context = new SerializationContext(OutboundPipeline, null, Serialization, buffer);
-
-                EventResponseMessage response = context.Deserialize<EventResponseMessage>();
+                EventResponseMessage response = encrypted.DecryptObject<EventResponseMessage>(EventDispatcher.EncryptionKey);
 
                 if (!VerifySignature(client, response, signature)) return;
 

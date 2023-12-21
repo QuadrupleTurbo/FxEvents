@@ -14,12 +14,14 @@ namespace FxEvents
     public class EventDispatcher : BaseScript
     {
         internal static Log Logger { get; set; }
-        internal static EventDispatcher Instance { get; set; }
         internal ExportDictionary GetExports => Exports;
         internal PlayerList GetPlayers => Players;
         internal static ServerGateway Events { get; set; }
         internal static bool Debug { get; set; }
         internal static bool Initialized = false;
+        internal static string EncryptionKey = "";
+
+        internal static EventDispatcher Instance;
 
         public EventDispatcher()
         {
@@ -27,6 +29,16 @@ namespace FxEvents
             Instance = this;
             string debugMode = API.GetResourceMetadata(API.GetCurrentResourceName(), "fxevents_debug_mode", 0);
             Debug = debugMode == "yes" || debugMode == "true" || int.TryParse(debugMode, out int num) && num > 0;
+            API.RegisterCommand("generatekey", new Action<int, List<object>, string>(async (a, b, c) =>
+            {
+                if (a != 0) return;
+                Logger.Info("Generating random passfrase with a 50 words dictionary...");
+                Tuple<string, string> ret = await Encryption.GenerateKey();
+                string print = $"Here is your generated encryption key, save it in a safe place.\nThis key is not saved by FXEvents anywhere, so please store it somewhere safe, if you save encrypted data and loose this key, your data will be lost.\n" +
+                $"You can always generate new keys by using \"generatekey\" command.\n" +
+                $"Passfrase: {ret.Item1}\nEncrypted Passfrase: {ret.Item2}";
+                Logger.Info(print);
+            }), false);
         }
 
         private static string SetSignaturePipelineString(string signatureString)
@@ -48,8 +60,15 @@ namespace FxEvents
             return @event;
         }
 
-        public static void Initalize(string inboundEvent, string outboundEvent, string signatureEvent)
+        public static void Initalize(string inboundEvent, string outboundEvent, string signatureEvent, string encryptionKey)
         {
+            if (string.IsNullOrWhiteSpace(encryptionKey))
+            {
+                Logger.Fatal("FXEvents: Encryption key cannot be empty, please add an encryption key or use generatekey command in console to generate one to save.");
+                return;
+            }
+            EncryptionKey = encryptionKey;
+
             if (string.IsNullOrWhiteSpace(signatureEvent))
             {
                 Logger.Error("SignaturePipeline cannot be null, empty or whitespace");
